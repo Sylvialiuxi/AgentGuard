@@ -240,7 +240,7 @@ agentguard/
 Clone the repository:
 
 ```bash
-git clone <YOUR-GITHUB-REPOSITORY-URL>
+git clone https://github.com/Sylvialiuxi/AgentGuard.git
 cd agentguard
 ```
 
