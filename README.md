@@ -511,3 +511,16 @@ AgentGuard is intended for educational, defensive security, and research purpose
 ## Architecture
 
 ![AgentGuard Security Architecture](assets/agentguard-architecture.png)
+
+## Dashboard
+
+AgentGuard provides an interactive Streamlit dashboard for security testing, risk analysis, policy decisions, and audit monitoring.
+
+![AgentGuard Security Dashboard](assets/dashboard.png)
+
+## Attack Demo: Path Traversal
+
+In this scenario, the AI agent is instructed to access:
+
+```text
+../sensitive/secret.txt
