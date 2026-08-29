@@ -507,3 +507,7 @@ Security enforcement should be applied outside the model through independent pol
 ## Disclaimer
 
 AgentGuard is intended for educational, defensive security, and research purposes.
+
+## Architecture
+
+![AgentGuard Security Architecture](assets/agentguard-architecture.png)
