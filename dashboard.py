@@ -7,9 +7,15 @@ from pathlib import Path
 import streamlit as st
 
 from agent.agent import run_agent
+from agent.llm_agent import run_llm_agent
+from security import config
 from security.policy_engine import evaluate_policy
 from security.prompt_detector import detect_prompt_injection
 from security.tool_risk import assess_tool_call
+from security.llm_judge import (
+    classify_prompt_injection,
+    review_tool_call,
+)
 from tools.file_tool import read_file
 from tools.log_tool import log_security_event
 
@@ -242,6 +248,39 @@ st.caption(
 
 
 # ============================================================
+# Defense mode indicator
+# ============================================================
+
+with st.sidebar:
+
+    st.subheader("Defense Mode")
+
+    if config.llm_defense_active():
+        st.success("LLM-assisted defense active")
+        st.caption(
+            f"Classifier: {config.JUDGE_MODEL}\n\n"
+            f"Score merge: {config.SCORE_MERGE_STRATEGY} | "
+            f"Fail-closed: {config.FAIL_CLOSED}"
+        )
+    else:
+        st.warning("Rules-only mode")
+        st.caption(
+            "No ANTHROPIC_API_KEY / disabled. "
+            "Deterministic engine only. "
+            "Set a key in .env to enable the LLM classifier "
+            "and tool-call intent review."
+        )
+
+    st.divider()
+    st.subheader("Agent Core")
+
+    if config.llm_agent_active():
+        st.success(f"Real LLM agent available ({config.AGENT_MODEL})")
+    else:
+        st.info("Simulated (regex) agent only")
+
+
+# ============================================================
 # Load report
 # ============================================================
 
@@ -426,38 +465,72 @@ with prompt_tab:
                 )
             )
 
+            rule_score = detection["risk_score"]
+
+            with st.spinner("Running LLM classifier..."):
+                llm_verdict = classify_prompt_injection(
+                    custom_prompt
+                )
+
+            score = config.merge_scores(
+                rule_score,
+                (
+                    llm_verdict["risk_score"]
+                    if llm_verdict["available"]
+                    else None
+                ),
+            )
+
             prompt_policy = (
                 evaluate_policy(
                     "PROMPT",
-                    detection[
-                        "risk_score"
-                    ],
+                    score,
                 )
             )
-
-            score = detection[
-                "risk_score"
-            ]
 
             decision = prompt_policy[
                 "decision"
             ]
 
-            col1, col2 = st.columns(2)
+            col1, col2, col3 = st.columns(3)
 
             col1.metric(
-                "Risk Score",
-                f"{score}/100",
+                "Rule Score",
+                f"{rule_score}/100",
             )
 
             col2.metric(
-                "Decision",
+                "LLM Score",
+                (
+                    f"{llm_verdict['risk_score']}/100"
+                    if llm_verdict["available"]
+                    else "n/a"
+                ),
+            )
+
+            col3.metric(
+                "Merged Decision",
                 decision,
+                help=f"Merged risk score: {score}/100",
             )
 
             st.progress(
                 score / 100
             )
+
+            if llm_verdict["available"]:
+                if llm_verdict["ok"]:
+                    st.caption(
+                        f"LLM ({llm_verdict['meta']['model']}, "
+                        f"{llm_verdict['meta']['latency_ms']} ms): "
+                        f"{llm_verdict['rationale']}"
+                    )
+                else:
+                    st.warning(
+                        f"LLM classifier failed "
+                        f"({llm_verdict['error']}) — "
+                        f"failing {'closed' if config.FAIL_CLOSED else 'open'}."
+                    )
 
             st.write(
                 "Detected Indicators"
@@ -530,6 +603,18 @@ with tool_tab:
         key="manual_target_path",
     )
 
+    user_goal = st.text_input(
+        "User goal (for LLM intent review)",
+        value="Read the input file and summarize its contents.",
+        key="manual_user_goal",
+    )
+
+    untrusted_context = st.text_area(
+        "Untrusted content the agent processed (optional)",
+        height=100,
+        key="manual_untrusted_context",
+    )
+
     if (
         "pending_tool_call"
         not in st.session_state
@@ -559,10 +644,27 @@ with tool_tab:
                 },
             )
 
+            with st.spinner("Running LLM intent review..."):
+                intent = review_tool_call(
+                    user_goal=user_goal,
+                    tool_name=tool_name,
+                    arguments={"file_path": target_path},
+                    untrusted_context=untrusted_context,
+                )
+
+            merged_score = config.merge_scores(
+                risk["risk_score"],
+                (
+                    intent["risk_score"]
+                    if intent["available"]
+                    else None
+                ),
+            )
+
             tool_policy = (
                 evaluate_policy(
                     "TOOL",
-                    risk["risk_score"],
+                    merged_score,
                 )
             )
 
@@ -578,6 +680,12 @@ with tool_tab:
                 "risk":
                     risk,
 
+                "intent":
+                    intent,
+
+                "merged_score":
+                    merged_score,
+
                 "decision":
                     tool_policy[
                         "decision"
@@ -592,33 +700,65 @@ with tool_tab:
 
         risk = pending["risk"]
         decision = pending["decision"]
+        intent = pending.get("intent", {"available": False})
+        merged_score = pending.get(
+            "merged_score", risk["risk_score"]
+        )
         current_target = pending[
             "target"
         ]
 
-        col1, col2, col3 = (
-            st.columns(3)
+        col1, col2, col3, col4 = (
+            st.columns(4)
         )
 
         col1.metric(
-            "Risk Score",
+            "Rule Score",
             f"{risk['risk_score']}/100",
         )
 
         col2.metric(
+            "LLM Intent Score",
+            (
+                f"{intent['risk_score']}/100"
+                if intent["available"]
+                else "n/a"
+            ),
+        )
+
+        col3.metric(
             "Risk Level",
             risk["risk_level"],
         )
 
-        col3.metric(
-            "Decision",
+        col4.metric(
+            "Merged Decision",
             decision,
+            help=f"Merged risk score: {merged_score}/100",
         )
 
         st.progress(
-            risk["risk_score"]
-            / 100
+            merged_score / 100
         )
+
+        if intent["available"]:
+            if intent["ok"]:
+                flag = (
+                    "consistent with goal"
+                    if intent["consistent_with_goal"]
+                    else "POSSIBLE GOAL HIJACK"
+                )
+                st.caption(
+                    f"LLM intent review ({intent['meta']['model']}, "
+                    f"{intent['meta']['latency_ms']} ms) — {flag}: "
+                    f"{intent['rationale']}"
+                )
+            else:
+                st.warning(
+                    f"LLM intent review failed "
+                    f"({intent['error']}) — "
+                    f"failing {'closed' if config.FAIL_CLOSED else 'open'}."
+                )
 
         st.write(
             "Risk Reasons"
@@ -705,14 +845,16 @@ with tool_tab:
                         source=(
                             current_target
                         ),
-                        risk_score=(
-                            risk[
-                                "risk_score"
-                            ]
-                        ),
+                        risk_score=merged_score,
                         verdict="APPROVED",
                         indicators=(
                             risk["reasons"]
+                        ),
+                        rule_score=risk["risk_score"],
+                        llm_score=(
+                            intent["risk_score"]
+                            if intent["available"]
+                            else None
                         ),
                     )
 
@@ -751,14 +893,16 @@ with tool_tab:
                         source=(
                             current_target
                         ),
-                        risk_score=(
-                            risk[
-                                "risk_score"
-                            ]
-                        ),
+                        risk_score=merged_score,
                         verdict="DENIED",
                         indicators=(
                             risk["reasons"]
+                        ),
+                        rule_score=risk["risk_score"],
+                        llm_score=(
+                            intent["risk_score"]
+                            if intent["available"]
+                            else None
                         ),
                     )
 
@@ -828,6 +972,24 @@ SCENARIO_FILES = {
 }
 
 
+use_llm_agent = st.checkbox(
+    "Use real LLM agent core (Phase 3)",
+    value=False,
+    disabled=not config.llm_agent_active(),
+    help=(
+        "Drives execution with a real tool-using Claude agent. "
+        "Requires ANTHROPIC_API_KEY. AgentGuard still enforces "
+        "policy on every tool call."
+    ),
+)
+
+sim_goal = st.text_input(
+    "Agent task / user goal",
+    value="Read the input file and summarize its contents.",
+    key="simulation_user_goal",
+)
+
+
 if (
     "simulation_output"
     not in st.session_state
@@ -852,14 +1014,26 @@ if st.button(
         io.StringIO()
     )
 
-    with redirect_stdout(
+    with st.spinner(
+        "Running LLM agent..."
+        if use_llm_agent
+        else "Running simulation..."
+    ), redirect_stdout(
         output_buffer
     ):
 
-        result = run_agent(
-            selected_file,
-            interactive_approval=False,
-        )
+        if use_llm_agent:
+            result = run_llm_agent(
+                selected_file,
+                interactive_approval=False,
+                user_goal=sim_goal,
+            )
+        else:
+            result = run_agent(
+                selected_file,
+                interactive_approval=False,
+                user_goal=sim_goal,
+            )
 
     output = (
         output_buffer.getvalue()
@@ -897,20 +1071,22 @@ if st.session_state[
 # Security Audit Log
 # ============================================================
 
-st.header(
-    "Security Audit Log"
-)
+st.header("Security Audit Log")
 
-logs = load_logs()
+@st.fragment(run_every="2s")
+def show_live_security_logs():
 
-if not logs:
+    logs = load_logs()
 
-    st.info(
-        "No security events "
-        "recorded yet."
+    st.caption(
+        "Live monitoring enabled — refreshing every 2 seconds"
     )
 
-else:
+    if not logs:
+        st.info(
+            "No security events recorded yet."
+        )
+        return
 
     recent_logs = list(
         reversed(
@@ -924,6 +1100,8 @@ else:
         hide_index=True,
     )
 
+
+show_live_security_logs()
 
 # ============================================================
 # AgentGuard Protection Flow

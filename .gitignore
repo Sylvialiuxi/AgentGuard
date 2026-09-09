@@ -19,6 +19,7 @@ Thumbs.db
 
 # Generated reports
 /reports/*.json
+/evals/results.json
 
 # Streamlit local configuration
 .streamlit/
@@ -26,3 +27,6 @@ Thumbs.db
 # Temporary files
 *.tmp
 *.temp
+
+# Secrets / local environment
+.env

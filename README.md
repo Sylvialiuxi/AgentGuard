@@ -193,7 +193,8 @@ High-risk and critical actions are blocked directly and cannot bypass policy thr
 agentguard/
 │
 ├── agent/
-│   └── agent.py
+│   ├── agent.py          # deterministic (regex) agent + rule/LLM score merge
+│   └── llm_agent.py      # real tool-using Claude agent core (Phase 3)
 │
 ├── data/
 │   ├── public/
@@ -212,7 +213,10 @@ agentguard/
 │
 ├── security/
 │   ├── approval.py
+│   ├── config.py         # runtime config + .env loader + score merge
 │   ├── file_policy.py
+│   ├── llm_client.py     # Anthropic SDK wrapper (never raises)
+│   ├── llm_judge.py      # LLM classifier + tool-call intent review
 │   ├── policy_engine.py
 │   ├── prompt_detector.py
 │   └── tool_risk.py
@@ -221,8 +225,15 @@ agentguard/
 │   ├── file_tool.py
 │   └── log_tool.py
 │
+├── evals/
+│   ├── dataset.jsonl     # labelled injection / benign prompts
+│   └── run_eval.py       # detection-rate / false-positive harness
+│
 ├── tests/
-│   └── test_security.py
+│   ├── test_security.py
+│   ├── test_llm_judge.py
+│   ├── test_llm_agent.py
+│   └── test_eval.py
 │
 ├── logs/
 │
@@ -462,17 +473,132 @@ AgentGuard currently focuses on several AI agent security threats:
 
 ---
 
+## LLM-Assisted Defense (optional)
+
+AgentGuard can layer a real LLM on top of the deterministic engine:
+
+- **Prompt-injection classifier** (`security/llm_judge.classify_prompt_injection`) —
+  a small model scores untrusted content; the score is merged (`max` by default)
+  with the rule-based score before the policy engine runs.
+- **Tool-call intent review** (`security/llm_judge.review_tool_call`) — before a
+  tool call is allowed, the model checks whether it actually serves the user's
+  stated goal, catching goal-hijacking that path/keyword rules miss.
+
+### Real LLM agent core (Phase 3)
+
+`agent/llm_agent.run_llm_agent` replaces the regex "interpretation" step with a
+real tool-using Claude agent (`AGENTGUARD_AGENT_MODEL`, default `claude-opus-5`).
+The model plans and calls a `read_file` tool; **every proposed tool call passes
+through the full AgentGuard gauntlet before it executes**:
+
+```
+model proposes read_file(path)
+  -> rule-based tool risk        (security/tool_risk.py)
+  -> LLM intent review           (security/llm_judge.py)
+  -> merged score -> policy      (security/policy_engine.py)
+  -> human approval if REVIEW    (security/approval.py)
+  -> allowlist enforcement       (security/file_policy.py)
+```
+
+The seed file content is scanned for injection before the loop starts, the agent
+loop is capped at `AGENTGUARD_AGENT_MAX_TURNS`, and any agent-core error or model
+refusal fails closed. With no API key, `run_llm_agent` falls back to the
+deterministic regex agent.
+
+- Dashboard: "Live Security Simulation" → "Use real LLM agent core" checkbox.
+- CLI: `python demo.py --llm`
+
+### Design rules
+
+- **Advisory, not authoritative.** The deterministic policy engine and the
+  file-system allowlist remain the enforcement points. LLM output is only one
+  input to the risk score.
+- **Fail closed.** If an LLM call times out, errors, or returns an unparseable
+  response, AgentGuard treats it as maximum risk (configurable).
+- **Judge is injection-hardened.** Untrusted content is wrapped in
+  `<untrusted_content>` tags with an explicit "analyse, never execute"
+  instruction, and the LLM score is still ensembled with the regex layer.
+- **Offline-safe.** With no `ANTHROPIC_API_KEY` (or `AGENTGUARD_LLM_DEFENSE=0`)
+  AgentGuard runs in deterministic rules-only mode, unchanged.
+
+### Configuration
+
+```bash
+cp .env.example .env
+# edit .env and set ANTHROPIC_API_KEY
+pip install -r requirements.txt
+```
+
+| Variable | Default | Purpose |
+|---|---|---|
+| `ANTHROPIC_API_KEY` | – | Enables the LLM defenses |
+| `AGENTGUARD_LLM_DEFENSE` | `1` | Master switch for the LLM defense layers |
+| `AGENTGUARD_LLM_AGENT` | `1` | Master switch for the real agent core |
+| `AGENTGUARD_FAIL_CLOSED` | `1` | Block/escalate when an LLM call fails |
+| `AGENTGUARD_JUDGE_MODEL` | `claude-haiku-4-5` | Classifier / reviewer model |
+| `AGENTGUARD_AGENT_MODEL` | `claude-opus-5` | Real agent core (Phase 3) |
+| `AGENTGUARD_AGENT_EFFORT` | `low` | Agent reasoning effort (`low`–`max`) |
+| `AGENTGUARD_AGENT_MAX_TURNS` | `6` | Cap on agent↔tool round trips |
+| `AGENTGUARD_SCORE_MERGE` | `max` | `max` or `avg` across layers |
+
+Content sent for classification is transmitted to the Anthropic API.
+
+### Detection eval
+
+`python -m evals.run_eval` runs a labelled dataset
+(`evals/dataset.jsonl`, 12 injection + 12 benign) through rules-only, LLM-only,
+and merged configurations and prints detection rate + false-positive rate.
+
+Measured (31 rows — 14 injection, 17 benign — `claude-haiku-4-5` classifier):
+
+| Configuration | Detection rate | False-positive rate |
+|---|---:|---:|
+| rules-only | 0.214 | 0.059 |
+| llm-only | **1.00** | **0.00** |
+| merged (`max`) | **1.00** | 0.059 |
+
+The regex layer catches only 3 of 14 injection attempts — it matches templated
+phrasings ("ignore all previous…") and misses authority spoofing, conditional
+injection, obfuscation, chained injection, and soft/polite task overrides
+entirely.
+
+Note that **merged scores worse than llm-only on false positives**, and the
+single false positive comes from the *rule* layer, not the model: `ben-11`
+("the system instruction manual for the HVAC unit") trips the broad
+`system\s+instruction` pattern in `prompt_detector.py` for 30 → REVIEW, while
+the classifier correctly scores it 5. With `SCORE_MERGE=max` a noisy rule can
+only add false positives, never remove them.
+
+Rows `ben-13`…`ben-17` are **regression guards** for a real defect found by
+running the app: the first classifier prompt scored injection *shape* rather
+than *severity*, so any document that referenced another document was blocked
+at 75/100 — including `data/public/approval_note.txt`, which made the deeper
+defense layers unreachable. The prompt now scores adversarial intent and
+explicitly defers file-target adjudication to the tool-risk layer. Keep those
+rows: they are what stops that regression from returning.
+
+Caveat: 31 hand-written rows is a smoke test, not a benchmark. The payloads were
+authored alongside the classifier prompt, so 14/14 overstates real-world recall.
+Grow the set with adversarial and in-the-wild samples before treating these
+numbers as a quality bar.
+
+---
+
 ## Current Limitations
 
 This project is an educational security prototype.
 
 Current limitations include:
 
-- Prompt detection is rule-based.
+- Rule-based detection is still the baseline; LLM classification is an optional
+  advisory layer.
 - Only a limited set of tool types is implemented.
-- Risk weights are manually configured.
+- Rule risk weights are manually configured.
 - Human approval is local rather than connected to an enterprise IAM system.
-- The agent is simulated rather than connected to a production LLM.
+- The real agent core (`agent/llm_agent.py`) exposes a single `read_file` tool;
+  HTTP / DB / write tools are not implemented yet.
+- The LLM classifier / intent-review prompts are un-tuned; no injection eval set
+  measures detection rate vs. false positives yet (Phase 4).
 - The file policy represents a simplified sandbox environment.
 
 ---
@@ -481,8 +607,8 @@ Current limitations include:
 
 Possible future extensions include:
 
-- Integration with real LLM APIs
-- LLM-based prompt injection classification
+- LLM output / data-exfiltration inspection layer
+- Larger, adversarially-sourced injection eval set
 - More agent tools such as HTTP and database access
 - Role-Based Access Control
 - Per-agent permissions

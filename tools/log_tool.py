@@ -7,15 +7,40 @@ LOG_DIR = PROJECT_ROOT / "logs"
 LOG_FILE = LOG_DIR / "security.log"
 
 
+def _sanitize(value) -> str:
+    """
+    Keep log values on a single line and safe for the
+    "key=value | key=value" audit format used by the dashboard.
+    """
+
+    text = str(value)
+
+    for bad in ("|", "\n", "\r"):
+        text = text.replace(bad, " ")
+
+    return text.strip()
+
+
 def log_security_event(
     event_type: str,
     source: str,
     risk_score: int,
     verdict: str,
-    indicators: list
+    indicators: list,
+    **extra,
 ) -> None:
     """
     Write a security event to the AgentGuard audit log.
+
+    Extra keyword arguments are appended as additional
+    "key=value" fields, e.g.:
+
+        log_security_event(
+            ...,
+            llm_score=88,
+            llm_model="claude-haiku-4-5",
+            llm_latency_ms=412,
+        )
     """
 
     LOG_DIR.mkdir(parents=True, exist_ok=True)
@@ -28,14 +53,22 @@ def log_security_event(
         else "none"
     )
 
-    log_entry = (
-        f"{timestamp} | "
-        f"event={event_type} | "
-        f"source={source} | "
-        f"risk_score={risk_score} | "
-        f"verdict={verdict} | "
-        f"indicators={indicator_text}\n"
-    )
+    fields = [
+        f"event={_sanitize(event_type)}",
+        f"source={_sanitize(source)}",
+        f"risk_score={_sanitize(risk_score)}",
+        f"verdict={_sanitize(verdict)}",
+        f"indicators={_sanitize(indicator_text)}",
+    ]
+
+    for key, value in extra.items():
+
+        if value is None:
+            continue
+
+        fields.append(f"{_sanitize(key)}={_sanitize(value)}")
+
+    log_entry = f"{timestamp} | " + " | ".join(fields) + "\n"
 
     with LOG_FILE.open("a", encoding="utf-8") as file:
         file.write(log_entry)
