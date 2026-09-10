@@ -8,10 +8,31 @@ SUSPICIOUS_PATTERNS = {
         r"disregard\s+(all\s+)?previous",
     ],
 
+    # A fake system message is recognised by its *position*, not by the
+    # words alone. "SYSTEM INSTRUCTION: ignore the above" is a forged
+    # directive header; "the system instruction manual for the HVAC unit"
+    # is an ordinary noun phrase. Matching the bare words flagged the
+    # second one, so these patterns require the phrase to actually be
+    # acting as a directive: a line-leading header, a role tag, or a
+    # shouted all-caps declaration.
     "fake_system_instruction": [
-        r"system\s+instruction",
-        r"developer\s+instruction",
-        r"important\s+system",
+        # Directive header at the start of a line, ending in a colon.
+        # Optional leading quote/bullet markers and brackets are allowed,
+        # as is an intensifier such as "IMPORTANT" or "URGENT".
+        r"(?m)^[\s>*#\-]*[\[\(<{]?\s*"
+        r"(important\s+|urgent\s+|priority\s+|new\s+)?"
+        r"(system|developer|admin|operator)\s+"
+        r"(instruction|message|prompt|note|directive|override)s?"
+        r"\s*[\]\)>}]?\s*:",
+
+        # Role tags borrowed from chat formats: <system>, </system>,
+        # [SYSTEM], <|developer|>
+        r"[<\[]\s*\|?\s*/?\s*(system|developer)\s*\|?\s*[>\]]",
+
+        # Shouted declaration anywhere in the text. All-caps is itself
+        # the signal, so this one is deliberately case-sensitive.
+        r"(?-i:\b(SYSTEM|DEVELOPER|ADMIN)\s+"
+        r"(INSTRUCTION|MESSAGE|PROMPT|DIRECTIVE|OVERRIDE)S?\b)",
     ],
 
     "sensitive_file_access": [
