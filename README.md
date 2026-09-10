@@ -118,16 +118,24 @@ allowlist remain the sole enforcement points, and any LLM failure is scored
 
 ## Security Scenarios
 
-AgentGuard currently demonstrates the following attack and control scenarios.
+`python security_report.py` scores these six cases. The scores below are the
+**deterministic engine alone**, so they are what you get with no API key:
 
-| Scenario | Risk | Decision |
-|---|---:|---|
-| Normal Content | 0 | ALLOW |
-| Prompt Injection | 90 | BLOCK |
-| Normal File Access | 0 | ALLOW |
-| Medium-Risk File Access | 20 | REVIEW |
-| Sensitive File Access | 100 | BLOCK |
-| Path Traversal | 100 | BLOCK |
+| Scenario | Layer | Risk | Decision |
+|---|---|---:|---|
+| Normal Content | prompt | 0 | ALLOW |
+| Prompt Injection | prompt | 90 | BLOCK |
+| Normal File Access | tool | 0 | ALLOW |
+| Medium-Risk File Access | tool | 20 | REVIEW |
+| Sensitive File Access | tool | 100 | BLOCK |
+| Path Traversal | tool | 100 | BLOCK |
+
+With the LLM classifier enabled these scores only ever rise, because the merged
+score is the maximum of the two layers — an `ALLOW` can become `REVIEW` or
+`BLOCK`, never the reverse. The classifier's contribution is not visible in this
+table because these six cases are the ones the regex layer was written for; the
+attacks it *misses* are in [`evals/dataset.jsonl`](evals/dataset.jsonl), and
+that gap is what [the eval](#detection-eval) measures.
 
 ---
 
@@ -276,6 +284,7 @@ agentguard/
 ├── demo.py
 ├── security_report.py
 ├── requirements.txt
+├── .env.example          # config template; copy to .env (git-ignored)
 ├── .gitignore
 └── README.md
 ```
@@ -309,6 +318,24 @@ Install dependencies:
 pip install -r requirements.txt
 ```
 
+### Optional: enable the LLM layers
+
+AgentGuard runs fully without this step, in deterministic rules-only mode.
+
+```bash
+cp .env.example .env
+# edit .env and set ANTHROPIC_API_KEY=sk-ant-...
+```
+
+Verify:
+
+```bash
+python -c "from security import config; print(config.llm_defense_active(), config.llm_agent_active())"
+```
+
+Two `True` values mean the classifier, the intent reviewer, and the real agent
+core are all available. `.env` is git-ignored.
+
 ---
 
 ## Run the Security Demo
@@ -319,14 +346,20 @@ Run:
 python demo.py
 ```
 
-The demo automatically executes multiple scenarios including:
+The demo executes five scenarios, chosen so that between them every layer is
+exercised rather than everything dying at the first one:
 
-```text
-Normal File
-Prompt Injection
-Sensitive Tool Call
-Path Traversal
-```
+| # | Scenario | Stopped at |
+|---|---|---|
+| 1 | Normal file | nothing — allowed through every layer |
+| 2 | Prompt injection | prompt layer |
+| 3 | Sensitive tool call | tool layer (rules) / refused by the model (LLM) |
+| 4 | Path traversal | tool layer (rules) / prompt layer (LLM) |
+| 5 | Human approval gate | approval gate — denied by default |
+
+Scenario 5 is the one that reaches the deeper layers: a legitimate goal naming a
+medium-risk file, so it passes the prompt layer and is stopped at the approval
+gate rather than by detection.
 
 Example result:
 
@@ -336,6 +369,26 @@ Example result:
 [POLICY] Tool decision: BLOCK
 
 [SECURITY BLOCK] Tool policy denied execution.
+```
+
+### With the real LLM agent
+
+```bash
+python demo.py --llm
+```
+
+Claude Opus 5 plans and proposes the tool calls instead of a regex; AgentGuard
+still gates every one of them. Without an API key the flag is ignored and the
+deterministic agent runs.
+
+```text
+[AGENTGUARD] Seed content prompt risk: 5/100 -> ALLOW
+[AGENT] Proposed tool call: read_file('public/key_notes.txt')
+[APPROVAL] Human approval required.
+[APPROVAL] Risk score: 20
+[APPROVAL] Reasons: ['sensitive_filename']
+[APPROVAL] No interactive approval available. Denied by default.
+[AGENTGUARD] REVIEW (risk 20/100)
 ```
 
 ---
@@ -406,15 +459,20 @@ python -m streamlit run dashboard.py
 
 The dashboard provides:
 
-- Security test summary
-- Risk scores
+- Defense-mode indicator in the sidebar — which layers and models are live
+- Security test summary and risk scores
 - ALLOW / REVIEW / BLOCK decisions
-- Prompt Injection Scanner
-- Tool Call Risk Analyzer
+- Prompt Injection Scanner — rule score, LLM score, merged decision, and the
+  model's stated reasoning side by side
+- Tool Call Risk Analyzer — takes a user goal, so the same path can be shown
+  scoring differently depending on intent
 - Human Approval controls
-- Live Security Simulation
-- Security Audit Logs
-- AgentGuard architecture overview
+- Live Security Simulation, with a toggle for the real LLM agent core
+- Security Audit Logs, refreshing every 2s, including the per-decision LLM fields
+- Protection-flow diagram that redraws to match the layers actually running
+
+The Prompt Scanner and Tool Analyzer call the API only when you press their
+buttons; nothing bills on page load or on the log refresh.
 
 ---
 
@@ -426,11 +484,16 @@ It separates security responsibilities into multiple layers:
 
 ### 1. Prompt Detector
 
-Detects suspicious instructions inside untrusted external content.
+Detects suspicious instructions inside untrusted external content. Two paths run
+here: 13 regex patterns, and — when enabled — an LLM classifier. Neither can
+veto the other; their scores are merged.
 
 ### 2. Risk Scoring
 
-Converts detected indicators into numerical risk scores.
+Converts detected indicators into numerical risk scores, and merges the rule and
+LLM scores by taking the maximum. Because the merge is a maximum, an added layer
+can only ever make the system more cautious, and a failed LLM call scores
+100/100 rather than passing through.
 
 ### 3. Policy Engine
 
@@ -444,7 +507,11 @@ BLOCK
 
 ### 4. Tool Risk Engine
 
-Evaluates the proposed action itself rather than trusting the AI agent's decision.
+Evaluates the proposed action itself rather than trusting the AI agent's
+decision. Also two paths: path and filename rules, plus — when enabled — an LLM
+intent review that asks whether this particular call serves the user's stated
+goal. That question is what catches goal hijacking, where the path is
+unremarkable but the reason for reading it came from injected text.
 
 ### 5. Human Approval
 
@@ -464,33 +531,28 @@ This provides multiple opportunities to stop an attack even if one security laye
 
 ## Security Audit Example
 
-Example security log:
+Every decision is written to `logs/security.log` as one pipe-delimited line.
+Real lines, rules-only mode:
 
 ```text
-event=PROMPT_SCAN
-source=public/malicious_note.txt
-risk_score=90
-verdict=BLOCK
+2026-09-10 11:44:18 | event=TOOL_CALL | source=../sensitive/secret.txt | risk_score=100 | verdict=BLOCK | indicators=sensitive_directory_access,sensitive_filename,path_traversal | rule_score=100
 ```
-
-Tool security event:
 
 ```text
-event=TOOL_CALL
-source=../sensitive/secret.txt
-risk_score=100
-verdict=BLOCK
-indicators=sensitive_directory_access,sensitive_filename,path_traversal
+2026-09-10 11:44:18 | event=HUMAN_APPROVAL | source=public/key_notes.txt | risk_score=20 | verdict=DENIED | indicators=sensitive_filename
 ```
 
-Human approval event:
+With the LLM layers active, each decision additionally records which layer
+produced it:
 
 ```text
-event=HUMAN_APPROVAL
-source=public/key_notes.txt
-risk_score=20
-verdict=APPROVED
+2026-09-09 23:31:36 | event=TOOL_CALL | source=public/report.txt | risk_score=5 | verdict=ALLOW | indicators=none | rule_score=0 | llm_score=5 | llm_model=claude-haiku-4-5 | llm_latency_ms=3078 | agent=llm
 ```
+
+`rule_score` and `llm_score` are logged separately from the merged `risk_score`,
+so the log answers a question the merged score cannot: *which layer actually
+caught this?* A line reading `rule_score=0 | llm_score=95 | verdict=BLOCK` is an
+attack the regex layer missed entirely.
 
 ---
 

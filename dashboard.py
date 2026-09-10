@@ -1111,12 +1111,14 @@ st.header(
     "AgentGuard Protection Flow"
 )
 
-st.code(
-    """
+# The flow shown reflects the layers actually active right now, so the
+# diagram never claims a topology the running configuration does not have.
+
+RULES_ONLY_FLOW = """
 Untrusted Content
        |
        v
-Prompt Injection Detector
+Rule Detector  (13 regex patterns)
        |
        v
 Prompt Risk Score
@@ -1129,13 +1131,13 @@ Policy Engine
  ALLOW   BLOCK
    |
    v
-AI Agent
+AI Agent  (regex instruction match)
    |
    v
 Proposed Tool Call
    |
    v
-Tool Risk Engine
+Tool Risk Engine  (path / filename rules)
    |
    v
 Tool Risk Score
@@ -1164,7 +1166,79 @@ All decisions
        v
 Security Audit Log
 """
-)
+
+LLM_ASSISTED_FLOW = """
+Untrusted Content
+       |
+   +---+-------------------+
+   |                       |
+Rule Detector        LLM Classifier
+(13 regex)           (Haiku 4.5)
+   |                       |
+   +---+-------------------+
+       |
+Merged Risk Score (max)
+       |
+       v
+Policy Engine
+       |
+   +---+---+
+   |       |
+ ALLOW   BLOCK
+   |
+   v
+AI Agent  (Claude Opus 5, tool use)
+   |
+   v
+Proposed Tool Call
+   |
+   +---+-------------------+
+   |                       |
+Tool Risk Engine     LLM Intent Review
+(path / filename)    (serves user goal?)
+   |                       |
+   +---+-------------------+
+       |
+Merged Risk Score (max)
+       |
+       v
+Policy Engine
+       |
++------+------+
+|      |      |
+ALLOW REVIEW BLOCK
+|      |       |
+|      v       |
+|   Human      |
+|   Approval   |
+|    /   \\     |
+|  YES   NO    |
+|   |     |    |
+v   v     v    v
+File Policy   Stop
+     |
+     v
+Tool Execution
+
+All decisions
+       |
+       v
+Security Audit Log
+(rule_score + llm_score)
+"""
+
+if config.llm_defense_active():
+    st.caption(
+        "LLM layers active — detection and tool review each run "
+        "two paths whose scores are merged (max)."
+    )
+    st.code(LLM_ASSISTED_FLOW)
+else:
+    st.caption(
+        "Rules-only mode — no API key, so the LLM paths are absent "
+        "and the deterministic engine runs alone."
+    )
+    st.code(RULES_ONLY_FLOW)
 
 
 # ============================================================
