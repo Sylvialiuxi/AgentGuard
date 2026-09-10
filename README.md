@@ -318,10 +318,12 @@ python -m unittest discover -s tests -v
 Current test suite:
 
 ```text
-Ran 10 tests
+Ran 25 tests
 
 OK
 ```
+
+The LLM judges are stubbed in tests, so the suite runs fully offline and costs nothing.
 
 The tests cover:
 
@@ -639,7 +641,21 @@ AgentGuard is intended for educational, defensive security, and research purpose
 
 ## Architecture
 
+Current architecture — the deterministic rule engine with the LLM layers running
+alongside it. Blue components are the original deterministic engine; purple
+components are LLM-assisted and can be switched off entirely.
+
+![AgentGuard Security Architecture with LLM layers](assets/agentguard-architecture-llm.png)
+
+<details>
+<summary>Original architecture (v1, rules-only)</summary>
+
+The first version, before the LLM layers were added. This is still the exact
+path AgentGuard takes when no `ANTHROPIC_API_KEY` is configured.
+
 ![AgentGuard Security Architecture](assets/agentguard-architecture.png)
+
+</details>
 
 ## Dashboard
 
