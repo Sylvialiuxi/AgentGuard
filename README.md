@@ -24,62 +24,95 @@ The project demonstrates a defense-in-depth approach for AI agent security by co
 - Interactive Streamlit Dashboard
 - Live Attack Simulation
 
+Optional LLM-assisted layers, on top of the deterministic engine
+(see [LLM-Assisted Defense](#llm-assisted-defense-optional)):
+
+- LLM Prompt Injection Classifier — raises detection from 0.29 to 1.00
+- LLM Tool-Call Intent Review — catches goal hijacking that pattern rules cannot
+- Real Tool-Using Agent Core — Claude Opus 5, gated by all seven layers
+- Detection Eval Harness — measured detection and false-positive rates
+
+All of them are advisory and fail closed, and the project runs unchanged
+without an API key.
+
 ---
 
 ## Security Architecture
 
-```text
-                 Untrusted Content
-                        |
-                        v
-             Prompt Injection Detector
-                        |
-                        v
-                 Prompt Risk Score
-                        |
-                        v
-                  Policy Engine
-                        |
-              +---------+---------+
-              |                   |
-            ALLOW               BLOCK
-              |
-              v
-           AI Agent
-              |
-              v
-       Proposed Tool Call
-              |
-              v
-        Tool Risk Engine
-              |
-              v
-         Tool Risk Score
-              |
-              v
-          Policy Engine
-              |
-       +------+-------+
-       |      |       |
-     ALLOW  REVIEW   BLOCK
-       |      |        |
-       |      v        |
-       |   Human       |
-       |   Approval    |
-       |   /     \      |
-       | YES     NO    |
-       |  |       |    |
-       v  v       v    v
-        File Access Policy
-              |
-              v
-         Tool Execution
+Detection runs as two parallel paths whose scores are merged before any
+decision is taken. The deterministic engine is always present; the LLM paths
+(marked `[LLM]`) drop out when no `ANTHROPIC_API_KEY` is configured, leaving
+the original pipeline intact.
 
-All security decisions
-        |
-        v
-Security Audit Log
+```text
+                     Untrusted Content
+                             |
+             +---------------+---------------+
+             |                               |
+      Rule Detector                   LLM Classifier  [LLM]
+    (13 regex patterns)              (Claude Haiku 4.5)
+             |                               |
+             +---------------+---------------+
+                             |
+                   Merged Risk Score (max)
+                             |
+                             v
+                       Policy Engine
+                             |
+             +---------------+---------------+
+             |               |               |
+           ALLOW          REVIEW           BLOCK
+             |               |
+             +---------------+
+                             |
+                             v
+                          AI Agent  [LLM]
+                 (Claude Opus 5, tool use loop)
+                             |
+                             v
+                     Proposed Tool Call
+                             |
+             +---------------+---------------+
+             |                               |
+      Tool Risk Engine              LLM Intent Review  [LLM]
+    (path/filename rules)      (does it serve the user goal?)
+             |                               |
+             +---------------+---------------+
+                             |
+                   Merged Risk Score (max)
+                             |
+                             v
+                       Policy Engine
+                             |
+             +---------------+---------------+
+             |               |               |
+           ALLOW          REVIEW           BLOCK
+             |               |               |
+             |               v               |
+             |        Human Approval         |
+             |          /         \          |
+             |        YES          NO        |
+             |         |           |         |
+             +----+----+           +----+----+
+                  |                     |
+                  v                     v
+          File Access Policy           Stop
+         (sandbox allowlist)
+                  |
+                  v
+            Tool Execution
+
+              Every decision from every layer
+                             |
+                             v
+                     Security Audit Log
+              (rule_score + llm_score + model)
 ```
+
+The LLM paths only contribute a risk score. The Policy Engine and the file
+allowlist remain the sole enforcement points, and any LLM failure is scored
+100/100 rather than passed through. See
+[LLM-Assisted Defense](#llm-assisted-defense-optional) for details.
 
 ---
 
