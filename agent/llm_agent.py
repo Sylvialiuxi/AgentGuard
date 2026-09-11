@@ -72,6 +72,80 @@ _READ_FILE_TOOL = {
 }
 
 
+_UNTRUSTED_SEPARATOR = "\n\n--- next untrusted item ---\n\n"
+
+
+def _join_untrusted(items: list) -> str:
+    """
+    Flatten everything untrusted the agent has seen into one blob
+    for the intent reviewer. review_tool_call() truncates this to
+    config.JUDGE_MAX_INPUT_CHARS, so keep the items small.
+    """
+
+    return _UNTRUSTED_SEPARATOR.join(items)
+
+
+def _scan_untrusted_content(
+    source: str,
+    content: str,
+    hop: str,
+) -> dict:
+    """
+    Run both prompt-injection detectors over untrusted content and
+    apply PROMPT policy to the merged score.
+
+    `hop` records where the content came from:
+        "seed"        - the file the user supplied
+        "tool_result" - a file the agent pulled in during the run
+
+    Both are scanned. A file that the seed file told the agent to
+    open is exactly where an indirect injection hides, so tool
+    results are untrusted input in their own right, not trusted
+    output just because the call that fetched them was allowed.
+
+    Returns {"decision", "score", "indicators"}.
+    """
+
+    rule_det = detect_prompt_injection(content)
+    llm_det = classify_prompt_injection(content)
+
+    indicators = list(rule_det["indicators"])
+
+    for category in (
+        llm_det["categories"] if llm_det["available"] else []
+    ):
+        if category not in indicators:
+            indicators.append(category)
+
+    score = config.merge_scores(
+        rule_det["risk_score"],
+        llm_det["risk_score"] if llm_det["available"] else None,
+    )
+
+    decision = evaluate_policy("PROMPT", score)["decision"]
+
+    log_security_event(
+        event_type="PROMPT_SCAN",
+        source=source,
+        risk_score=score,
+        verdict=decision,
+        indicators=indicators,
+        rule_score=rule_det["risk_score"],
+        llm_score=(
+            llm_det["risk_score"] if llm_det["available"] else None
+        ),
+        llm_model=llm_det["meta"]["model"],
+        hop=hop,
+        agent="llm",
+    )
+
+    return {
+        "decision": decision,
+        "score": score,
+        "indicators": indicators,
+    }
+
+
 def _guarded_read_file(
     target_file: str,
     user_goal: str,
@@ -173,10 +247,42 @@ def _guarded_read_file(
 
     # ALLOW, or REVIEW+approved. file_policy is still the final
     # boundary inside read_file().
+    content = read_file(target_file)
+
+    # The call was allowed; its *result* still has not been vetted.
+    # Scan it before it reaches the model's context, so a clean file
+    # cannot launder an injection by pointing at a dirty one.
+    if not content.startswith("[SECURITY BLOCK]"):
+
+        scan = _scan_untrusted_content(
+            source=target_file,
+            content=content,
+            hop="tool_result",
+        )
+
+        if scan["decision"] == "BLOCK":
+
+            for indicator in scan["indicators"]:
+                if indicator not in reasons:
+                    reasons.append(indicator)
+
+            return {
+                "allowed": False,
+                "decision": "BLOCK",
+                "content": (
+                    "[SECURITY BLOCK] The contents of "
+                    f"'{target_file}' were flagged as a prompt "
+                    f"injection (risk {scan['score']}/100) and were "
+                    "not added to the agent's context."
+                ),
+                "risk_score": max(merged, scan["score"]),
+                "reasons": reasons,
+            }
+
     return {
         "allowed": True,
         "decision": decision,
-        "content": read_file(target_file),
+        "content": content,
         "risk_score": merged,
         "reasons": reasons,
     }
@@ -224,43 +330,18 @@ def run_llm_agent(
         print(seed_content)
         return seed_content
 
-    rule_det = detect_prompt_injection(seed_content)
-    llm_det = classify_prompt_injection(seed_content)
-
-    indicators = list(rule_det["indicators"])
-    for category in (
-        llm_det["categories"] if llm_det["available"] else []
-    ):
-        if category not in indicators:
-            indicators.append(category)
-
-    prompt_score = config.merge_scores(
-        rule_det["risk_score"],
-        llm_det["risk_score"] if llm_det["available"] else None,
+    seed_scan = _scan_untrusted_content(
+        source=input_file,
+        content=seed_content,
+        hop="seed",
     )
-
-    prompt_policy = evaluate_policy("PROMPT", prompt_score)
 
     print(
-        f"[AGENTGUARD] Seed content prompt risk: {prompt_score}/100 "
-        f"-> {prompt_policy['decision']}"
+        f"[AGENTGUARD] Seed content prompt risk: "
+        f"{seed_scan['score']}/100 -> {seed_scan['decision']}"
     )
 
-    log_security_event(
-        event_type="PROMPT_SCAN",
-        source=input_file,
-        risk_score=prompt_score,
-        verdict=prompt_policy["decision"],
-        indicators=indicators,
-        rule_score=rule_det["risk_score"],
-        llm_score=(
-            llm_det["risk_score"] if llm_det["available"] else None
-        ),
-        llm_model=llm_det["meta"]["model"],
-        agent="llm",
-    )
-
-    if prompt_policy["decision"] == "BLOCK":
+    if seed_scan["decision"] == "BLOCK":
         result = (
             "[SECURITY BLOCK] Prompt policy denied execution "
             "(seed content flagged as injection)."
@@ -288,6 +369,11 @@ def run_llm_agent(
     ]
 
     final_text = ""
+
+    # Everything untrusted the agent has seen so far. The intent
+    # reviewer needs the content that actually triggered a call,
+    # not just the file the user handed over.
+    untrusted_seen = [seed_content]
 
     for turn in range(config.AGENT_MAX_TURNS):
 
@@ -368,7 +454,9 @@ def run_llm_agent(
                     f"{user_goal} "
                     f"(the user supplied the file '{input_file}')"
                 ),
-                untrusted_context=seed_content,
+                untrusted_context=_join_untrusted(
+                    untrusted_seen
+                ),
                 interactive_approval=interactive_approval,
             )
 
@@ -376,6 +464,9 @@ def run_llm_agent(
                 f"[AGENTGUARD] {verdict['decision']} "
                 f"(risk {verdict['risk_score']}/100)"
             )
+
+            if verdict["allowed"]:
+                untrusted_seen.append(verdict["content"])
 
             tool_results.append(
                 {

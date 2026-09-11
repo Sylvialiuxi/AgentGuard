@@ -37,6 +37,17 @@ class FakeClient:
         return self
 
 
+INACTIVE_SCAN = {
+    "available": False,
+    "ok": False,
+    "risk_score": 0,
+    "categories": [],
+    "rationale": "",
+    "error": "inactive",
+    "meta": {"model": None, "latency_ms": 0},
+}
+
+
 INACTIVE_INTENT = {
     "available": False,
     "ok": False,
@@ -55,12 +66,16 @@ class TestGuardedReadFile(unittest.TestCase):
     """
 
     def setUp(self):
-        patcher = mock.patch(
-            "agent.llm_agent.review_tool_call",
-            return_value=INACTIVE_INTENT,
-        )
-        self.addCleanup(patcher.stop)
-        patcher.start()
+        for target, value in (
+            ("review_tool_call", INACTIVE_INTENT),
+            ("classify_prompt_injection", INACTIVE_SCAN),
+        ):
+            patcher = mock.patch(
+                f"agent.llm_agent.{target}",
+                return_value=value,
+            )
+            self.addCleanup(patcher.stop)
+            patcher.start()
 
     def test_blocks_path_traversal_even_if_model_asks(self):
         verdict = llm_agent._guarded_read_file(
@@ -96,6 +111,71 @@ class TestGuardedReadFile(unittest.TestCase):
         self.assertTrue(verdict["allowed"])
         self.assertEqual(verdict["decision"], "ALLOW")
         self.assertNotIn("[SECURITY BLOCK]", verdict["content"])
+
+
+class TestToolResultScanning(unittest.TestCase):
+    """
+    A tool call can be entirely legitimate and still return an
+    attack. These cover the second hop: the path passes every
+    path-based check, but the file's *contents* are an injection.
+
+    The LLM classifier is stubbed inactive, so these assert on the
+    deterministic rule detector alone — no network, no spend.
+    """
+
+    def setUp(self):
+        for target, value in (
+            ("review_tool_call", INACTIVE_INTENT),
+            ("classify_prompt_injection", INACTIVE_SCAN),
+        ):
+            patcher = mock.patch(
+                f"agent.llm_agent.{target}",
+                return_value=value,
+            )
+            self.addCleanup(patcher.stop)
+            patcher.start()
+
+    def test_allowed_path_with_injected_contents_is_blocked(self):
+        # public/ is on the allowlist and the path trips no tool
+        # rule, so every path-based layer says yes. Only the
+        # content scan can catch this one.
+        verdict = llm_agent._guarded_read_file(
+            target_file="public/malicious_note.txt",
+            user_goal="summarize the report",
+            untrusted_context="",
+            interactive_approval=False,
+        )
+
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["decision"], "BLOCK")
+        self.assertIn("[SECURITY BLOCK]", verdict["content"])
+        self.assertIn("instruction_override", verdict["reasons"])
+
+    def test_block_message_withholds_the_payload(self):
+        # The whole point is to keep the injection out of the
+        # model's context, so the replacement text must not carry
+        # the payload through.
+        verdict = llm_agent._guarded_read_file(
+            target_file="public/malicious_note.txt",
+            user_goal="summarize the report",
+            untrusted_context="",
+            interactive_approval=False,
+        )
+
+        self.assertNotIn("Ignore all previous", verdict["content"])
+        self.assertNotIn("secret.txt", verdict["content"])
+
+    def test_clean_file_still_passes(self):
+        # Guard against the scan turning into a blanket denial.
+        verdict = llm_agent._guarded_read_file(
+            target_file="public/report.txt",
+            user_goal="summarize the report",
+            untrusted_context="",
+            interactive_approval=False,
+        )
+
+        self.assertTrue(verdict["allowed"])
+        self.assertIn("Quarterly", verdict["content"])
 
 
 class TestFallback(unittest.TestCase):
