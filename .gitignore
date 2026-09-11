@@ -17,8 +17,7 @@ Thumbs.db
 # Runtime security logs
 /logs/*.log
 
-# Generated reports
-/reports/*.json
+# Generated eval results
 /evals/results.json
 
 # Streamlit local configuration

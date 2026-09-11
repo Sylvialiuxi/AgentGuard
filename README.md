@@ -118,7 +118,7 @@ allowlist remain the sole enforcement points, and any LLM failure is scored
 
 ## Security Scenarios
 
-`python security_report.py` scores these six cases. The scores below are the
+`pytest tests/test_security.py` asserts these six cases. The scores below are the
 **deterministic engine alone**, so they are what you get with no API key:
 
 | Scenario | Layer | Risk | Decision |
@@ -278,11 +278,8 @@ agentguard/
 │
 ├── logs/
 │
-├── reports/
-│
 ├── dashboard.py
 ├── demo.py
-├── security_report.py
 ├── requirements.txt
 ├── .env.example          # config template; copy to .env (git-ignored)
 ├── .gitignore
@@ -421,31 +418,6 @@ The tests cover:
 - Tool risk scoring
 - Path traversal detection
 - File policy enforcement
-
----
-
-## Generate Security Report
-
-Run:
-
-```bash
-python security_report.py
-```
-
-Example:
-
-```text
-Total tests: 6
-ALLOW:       2
-REVIEW:      1
-BLOCK:       3
-```
-
-A machine-readable JSON report is generated at:
-
-```text
-reports/security_report.json
-```
 
 ---
 
