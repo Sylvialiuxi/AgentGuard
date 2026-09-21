@@ -225,11 +225,6 @@ def run_agent(
     )
 
     print(
-        f"[AGENTGUARD] Tool risk level: "
-        f"{tool_risk['risk_level']}"
-    )
-
-    print(
         f"[AGENTGUARD] Tool risk reasons: "
         f"{tool_risk['reasons']}"
     )
@@ -256,7 +251,7 @@ def run_agent(
         )
 
         if not intent["consistent_with_goal"]:
-            tool_reasons.append("llm_goal_hijack_suspected")
+            tool_reasons.append("llm_goal_mismatch")
 
     tool_risk_score = config.merge_scores(
         tool_rule_score,
