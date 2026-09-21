@@ -19,6 +19,7 @@ Thumbs.db
 
 # Generated eval results
 /evals/results.json
+/evals/tool_results.json
 
 # Streamlit local configuration
 .streamlit/
