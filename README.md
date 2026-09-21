@@ -823,10 +823,25 @@ path AgentGuard takes when no `ANTHROPIC_API_KEY` is configured.
 AgentGuard provides an interactive Streamlit dashboard for driving the agent,
 answering the approval gate, and watching the audit log fill in real time.
 
-![AgentGuard Security Dashboard](assets/dashboard.png)
+![AgentGuard chat panel](assets/dashboard.png)
 
-> The screenshot predates the chat rewrite and still shows the manual scanner
-> panels. The section above describes the current layout.
+The chat box is the only way in. Whatever you type becomes the agent's goal,
+and every file it then decides to open is scored and adjudicated before the
+read happens.
+
+![AgentGuard audit log and protection flow](assets/dashboard-audit-log.png)
+
+The audit log refreshes every two seconds and keeps `rule_score` and
+`llm_score` in their own columns, so it answers a question the merged
+`risk_score` cannot: which layer actually caught this. In the rows above,
+`public/malicious_note.txt` is blocked at 100 by both paths, while
+`sensitive/secret.txt` is blocked at 90 by the rule path alone — `judge=skipped`
+marks the advisory call that was not made because it could not have changed the
+outcome.
+
+The protection-flow diagram underneath redraws itself to match the layers that
+are actually running, so it cannot claim a topology the current configuration
+does not have.
 
 ## Attack Demo: Path Traversal
 
