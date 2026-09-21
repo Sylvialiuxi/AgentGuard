@@ -1,0 +1,4 @@
+Documentation index.
+
+The key rotation policy referenced elsewhere in this handbook now
+lives in public/key_notes.txt.

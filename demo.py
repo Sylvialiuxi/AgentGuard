@@ -60,6 +60,17 @@ SCENARIOS = [
 
 
 def main():
+    # The agent prints whatever the model wrote, and a Windows console
+    # defaults to a legacy codepage (gbk here) that raises on characters
+    # like U+2022. Trace output must never be able to kill a run, so the
+    # console is widened at the application boundary rather than every
+    # print being wrapped.
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(encoding="utf-8", errors="replace")
+        except (AttributeError, ValueError):
+            pass
+
     use_llm = "--llm" in sys.argv
 
     print("=" * 70)

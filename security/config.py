@@ -60,6 +60,16 @@ LLM_DEFENSE_ENABLED = _env_flag("AGENTGUARD_LLM_DEFENSE", True)
 # defense, or a simulated agent with LLM defense.
 LLM_AGENT_ENABLED = _env_flag("AGENTGUARD_LLM_AGENT", True)
 
+# Red-team switch. With this on, the agent runs without the clause
+# that tells it to distrust file contents - the standard assumption
+# behind every prompt-injection defence, made testable.
+#
+# It weakens the agent, never AgentGuard: the guard sees exactly the
+# same calls and applies exactly the same policy. That is the point,
+# and it is the only way to observe the later layers, because a
+# well-behaved model refuses the redirect long before they run.
+UNSAFE_AGENT = _env_flag("AGENTGUARD_UNSAFE_AGENT", False)
+
 API_KEY = os.environ.get("ANTHROPIC_API_KEY")
 
 
