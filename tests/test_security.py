@@ -115,8 +115,8 @@ class TestToolRiskEngine(unittest.TestCase):
         )
 
         self.assertEqual(
-            result["risk_level"],
-            "LOW",
+            result["reasons"],
+            [],
         )
 
     def test_sensitive_file(self):
@@ -127,15 +127,86 @@ class TestToolRiskEngine(unittest.TestCase):
             },
         )
 
+        # 80 for the directory + 10 for the filename keyword. The
+        # exact total matters less than the decision it produces,
+        # asserted below.
         self.assertEqual(
             result["risk_score"],
-            100,
+            90,
         )
 
         self.assertIn(
             "sensitive_directory_access",
             result["reasons"],
         )
+
+        self.assertEqual(
+            evaluate_policy(
+                "TOOL",
+                result["risk_score"],
+            )["decision"],
+            "BLOCK",
+        )
+
+    def test_filename_keyword_needs_corroboration(self):
+        """
+        A keyword in the filename is weak evidence. On its own it
+        must not hold a call that is otherwise unremarkable:
+        public/key_notes.txt is an allowlisted, harmless file.
+        """
+
+        result = assess_tool_call(
+            "read_file",
+            {
+                "file_path": "public/key_notes.txt"
+            },
+        )
+
+        self.assertIn(
+            "sensitive_filename",
+            result["reasons"],
+        )
+
+        self.assertEqual(
+            evaluate_policy(
+                "TOOL",
+                result["risk_score"],
+            )["decision"],
+            "ALLOW",
+        )
+
+    def test_filename_keywords_match_whole_words(self):
+        """
+        The keyword list is matched against filename words, not as
+        substrings. "key" inside monkey, "token" inside tokenizer
+        and "private" inside a longer word are not signals.
+        """
+
+        for filename in (
+            "monkey.txt",
+            "turkey_recipe.txt",
+            "tokenizer.py",
+            "keyboard_layout.md",
+        ):
+
+            with self.subTest(filename=filename):
+
+                result = assess_tool_call(
+                    "read_file",
+                    {
+                        "file_path": f"public/{filename}"
+                    },
+                )
+
+                self.assertEqual(
+                    result["risk_score"],
+                    0,
+                )
+
+                self.assertEqual(
+                    result["reasons"],
+                    [],
+                )
 
     def test_path_traversal(self):
         result = assess_tool_call(

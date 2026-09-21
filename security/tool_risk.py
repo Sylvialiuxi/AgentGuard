@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -32,23 +33,34 @@ def assess_tool_call(tool_name: str, arguments: dict) -> dict:
                 "sensitive_directory_access"
             )
 
-        # Suspicious filenames
-        sensitive_names = [
+        # Suspicious filenames.
+        #
+        # Matched as whole words rather than substrings. As a
+        # substring, "key" fired on monkey.txt and turkey_recipe.txt
+        # and "token" on tokenizer.py; splitting the name on its
+        # separators keeps key_notes.txt matching and drops that
+        # entire class of false positive.
+        #
+        # The weight sits below the REVIEW threshold on purpose. A
+        # keyword in a filename is weak evidence by itself -- the
+        # file still has to be inside an allowlisted directory to be
+        # reachable at all -- so it should corroborate another
+        # signal rather than hold a call on its own.
+        sensitive_names = {
             "secret",
             "password",
             "credential",
             "token",
             "private",
             "key",
-        ]
+        }
 
-        filename = path.name.lower()
+        filename_words = set(
+            re.split(r"[^a-z0-9]+", path.name.lower())
+        )
 
-        if any(
-            word in filename
-            for word in sensitive_names
-        ):
-            risk_score += 20
+        if filename_words & sensitive_names:
+            risk_score += 10
             reasons.append(
                 "sensitive_filename"
             )
@@ -62,21 +74,8 @@ def assess_tool_call(tool_name: str, arguments: dict) -> dict:
 
     risk_score = min(risk_score, 100)
 
-    if risk_score >= 80:
-        risk_level = "CRITICAL"
-
-    elif risk_score >= 50:
-        risk_level = "HIGH"
-
-    elif risk_score >= 20:
-        risk_level = "MEDIUM"
-
-    else:
-        risk_level = "LOW"
-
     return {
         "tool": tool_name,
         "risk_score": risk_score,
-        "risk_level": risk_level,
         "reasons": reasons,
     }
