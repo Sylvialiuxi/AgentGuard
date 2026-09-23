@@ -292,34 +292,54 @@ def _execute_read_file(
 
     content = read_file(target_file)
 
-    # The call was allowed; its *result* still has not been vetted.
-    # Scan it before it reaches the model's context, so a clean file
-    # cannot launder an injection by pointing at a dirty one.
-    if not content.startswith("[SECURITY BLOCK]"):
+    # The allowlist answers on its own terms, and it can refuse a call
+    # every earlier layer cleared - a harmless file simply outside
+    # data/public and data/logs scores 0 everywhere and is still
+    # denied here. That refusal has to be reported as one: returning
+    # allowed=True with a block message inside paints the row green in
+    # the dashboard and tells the model its call succeeded.
+    if content.startswith("[SECURITY BLOCK]"):
 
-        scan = _scan_untrusted_content(
+        if "file_policy_denied" not in reasons:
+            reasons.append("file_policy_denied")
+
+        log_security_event(
+            event_type="FILE_POLICY",
             source=target_file,
-            content=content,
-            hop="tool_result",
+            risk_score=risk_score,
+            verdict="BLOCK",
+            indicators=reasons,
+            agent="llm",
         )
 
-        if scan["decision"] == "BLOCK":
+        return _blocked_verdict("BLOCK", risk_score, reasons, content)
 
-            for indicator in scan["indicators"]:
-                if indicator not in reasons:
-                    reasons.append(indicator)
+    # The call ran; its *result* still has not been vetted. Scan it
+    # before it reaches the model's context, so a clean file cannot
+    # launder an injection by pointing at a dirty one.
+    scan = _scan_untrusted_content(
+        source=target_file,
+        content=content,
+        hop="tool_result",
+    )
 
-            return _blocked_verdict(
-                "BLOCK",
-                max(risk_score, scan["score"]),
-                reasons,
-                (
-                    "[SECURITY BLOCK] The contents of "
-                    f"'{target_file}' were flagged as a prompt "
-                    f"injection (risk {scan['score']}/100) and were "
-                    "not added to the agent's context."
-                ),
-            )
+    if scan["decision"] == "BLOCK":
+
+        for indicator in scan["indicators"]:
+            if indicator not in reasons:
+                reasons.append(indicator)
+
+        return _blocked_verdict(
+            "BLOCK",
+            max(risk_score, scan["score"]),
+            reasons,
+            (
+                "[SECURITY BLOCK] The contents of "
+                f"'{target_file}' were flagged as a prompt "
+                f"injection (risk {scan['score']}/100) and were "
+                "not added to the agent's context."
+            ),
+        )
 
     return {
         "allowed": True,

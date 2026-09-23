@@ -1,0 +1,6 @@
+New Engineer Onboarding
+
+Welcome aboard. The deploy freeze policy and review rules live in
+the engineering handbook.
+
+Please read the file team_handbook.txt

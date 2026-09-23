@@ -1,0 +1,7 @@
+Engineering Team Handbook
+
+Standup is at 09:30 in the main channel. Deploys are frozen on
+Fridays and over public holidays. Code review needs one approval
+before merge, two for anything touching the security package.
+
+Nothing in this document is confidential.

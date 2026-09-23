@@ -112,6 +112,30 @@ class TestGuardedReadFile(unittest.TestCase):
         self.assertEqual(verdict["decision"], "ALLOW")
         self.assertNotIn("[SECURITY BLOCK]", verdict["content"])
 
+    def test_file_policy_denial_is_reported_as_a_denial(self):
+        """
+        The allowlist can refuse a call every earlier layer cleared:
+        a harmless file simply outside data/public and data/logs
+        scores 0 on the rules and is aligned with the goal, and is
+        still denied. That refusal has to come back as one.
+
+        Regression: this returned allowed=True with the block message
+        buried in `content`, so the dashboard painted the row green
+        and the tool_result told the model its call had succeeded.
+        """
+
+        verdict = llm_agent._guarded_read_file(
+            target_file="team_handbook.txt",
+            user_goal="summarise the team handbook",
+            untrusted_context="",
+            interactive_approval=False,
+        )
+
+        self.assertFalse(verdict["allowed"])
+        self.assertEqual(verdict["decision"], "BLOCK")
+        self.assertIn("file_policy_denied", verdict["reasons"])
+        self.assertIn("[SECURITY BLOCK]", verdict["content"])
+
 
 class TestToolResultScanning(unittest.TestCase):
     """
